@@ -5753,6 +5753,8 @@ namespace ts {
     export interface TemplateLiteralType extends InstantiableType {
         texts: readonly string[];  // Always one element longer than types
         types: readonly Type[];  // Always at least one element
+        /* @internal */
+        isStringLiteralPatternMatchable: (source: StringLiteralType) => boolean;
     }
 
     export interface StringMappingType extends InstantiableType {

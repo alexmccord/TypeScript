@@ -15338,9 +15338,10 @@ namespace ts {
         function getTemplateLiteralType(texts: readonly string[], types: readonly Type[]): Type {
             const unionIndex = findIndex(types, t => !!(t.flags & (TypeFlags.Never | TypeFlags.Union)));
             if (unionIndex >= 0) {
-                return checkCrossProductUnion(types) ?
-                    mapType(types[unionIndex], t => getTemplateLiteralType(texts, replaceElement(types, unionIndex, t))) :
-                    errorType;
+                return createTemplateLiteralType(texts, types);
+                // return getCrossProductUnionSize(types) > 1000
+                //     ? createTemplateLiteralType(texts, types)
+                //     : mapType(types[unionIndex], t => getTemplateLiteralType(texts, replaceElement(types, unionIndex, t)));
             }
             if (contains(types, wildcardType)) {
                 return wildcardType;
@@ -15348,9 +15349,7 @@ namespace ts {
             const newTypes: Type[] = [];
             const newTexts: string[] = [];
             let text = texts[0];
-            if (!addSpans(texts, types)) {
-                return stringType;
-            }
+            addSpans(texts, types);
             if (newTypes.length === 0) {
                 return getStringLiteralType(text);
             }
@@ -15365,7 +15364,7 @@ namespace ts {
             }
             return type;
 
-            function addSpans(texts: readonly string[] | string, types: readonly Type[]): boolean {
+            function addSpans(texts: readonly string[] | string, types: readonly Type[]) {
                 const isTextsArray = isArray(texts);
                 for (let i = 0; i < types.length; i++) {
                     const t = types[i];
@@ -15373,13 +15372,11 @@ namespace ts {
                     if (t.flags & (TypeFlags.Literal | TypeFlags.Null | TypeFlags.Undefined)) {
                         text += getTemplateStringForType(t) || "";
                         text += addText;
-                        if (!isTextsArray) return true;
                     }
                     else if (t.flags & TypeFlags.TemplateLiteral) {
                         text += (t as TemplateLiteralType).texts[0];
-                        if (!addSpans((t as TemplateLiteralType).texts, (t as TemplateLiteralType).types)) return false;
+                        addSpans((t as TemplateLiteralType).texts, (t as TemplateLiteralType).types);
                         text += addText;
-                        if (!isTextsArray) return true;
                     }
                     else if (isGenericIndexType(t) || isPatternLiteralPlaceholderType(t)) {
                         newTypes.push(t);
@@ -15387,14 +15384,9 @@ namespace ts {
                         text = addText;
                     }
                     else if (t.flags & TypeFlags.Intersection) {
-                        const added = addSpans(texts[i + 1], (t as IntersectionType).types);
-                        if (!added) return false;
-                    }
-                    else if (isTextsArray) {
-                        return false;
+                        addSpans(texts[i + 1], (t as IntersectionType).types);
                     }
                 }
-                return true;
             }
         }
 
@@ -15406,10 +15398,139 @@ namespace ts {
                 undefined;
         }
 
+        function createCombinatorialParser(texts: readonly string[], types: readonly Type[]): (source: StringLiteralType) => boolean {
+            type Cursor = { readonly value: string, index: number };
+            type TypeParser = (cursor: Cursor) => boolean;
+
+            const ok = () => true;
+            function optional(...parsers: TypeParser[]): TypeParser {
+                return or(...parsers, ok);
+            }
+
+            const plusminus = or(exact('+'), exact('-'));
+            const manyDigits = takeMany((char) => char >= '0' && char <= '9');
+            const exponent = and(or(exact('e'), exact('E')), optional(plusminus), manyDigits);
+            const numberParserImpl = or(
+                and(manyDigits, optional(and(exact('.'), optional(manyDigits))), optional(exponent)),
+                and(exact('.'), manyDigits, optional(exponent))
+            );
+
+            const binhexoct = and(exact('0'), or(
+                and(or(exact('b'), exact('B')), takeMany((char) => char === '0' || char === '1')),
+                and(or(exact('x'), exact('X')), takeMany((char) => char >= '0' && char <= '9' || char.toLowerCase() >= 'a' && char.toLowerCase() <= 'f')),
+                and(or(exact('o'), exact('O')), takeMany((char) => char >= '0' && char <= '7')),
+            ));
+
+            const bigintParser: TypeParser = (c: Cursor) => and(optional(exact('-')), or(binhexoct, manyDigits))(c);
+            const numberParser: TypeParser = (c: Cursor) => plusminus(c) ? numberParserImpl(c) : or(binhexoct, numberParserImpl)(c);
+
+            const parsers: TypeParser[] = [];
+            parsers.push(exact(texts[0]));
+
+            for (let i = 0; i < types.length; ++i) {
+                parsers.push(resolveParser(types[i], texts[i + 1]));
+            }
+
+            function resolveParser(type: Type, nextText: string): TypeParser {
+                if (type.flags & (TypeFlags.Literal | TypeFlags.Nullable)) {
+                    return and(exact(getTemplateStringForType(type) || ""), exact(nextText));
+                }
+                else if (type.flags & TypeFlags.TemplateLiteral) {
+                    const templateTy = type as TemplateLiteralType;
+                    const subparsers: TypeParser[] = [];
+                    subparsers.push(exact(templateTy.texts[0]));
+
+                    for (let i = 0; i < templateTy.types.length; ++i) {
+                        subparsers.push(resolveParser(templateTy.types[i], templateTy.texts[i + 1]));
+                    }
+
+                    return and(...subparsers);
+                }
+                else if (type.flags & (TypeFlags.Any | TypeFlags.String)) {
+                    const p = exact(nextText);
+                    return (c: Cursor) => {
+                        const oldIndex = c.index;
+                        while (c.index < c.value.length) {
+                            if (p(c)) {
+                                return true;
+                            }
+                            ++c.index;
+                        }
+                        c.index = oldIndex;
+                        return false;
+                    };
+                }
+                else if (type.flags & TypeFlags.Number) {
+                    return and(numberParser, exact(nextText));
+                }
+                else if (type.flags & TypeFlags.BigInt) {
+                    return and(bigintParser, exact(nextText));
+                }
+                else if (type.flags & TypeFlags.Union) {
+                    return or(...(type as UnionType).types.map(t => resolveParser(t, nextText)));
+                }
+                else {
+                    return () => false; // Parser that guarantees a failure.
+                }
+            }
+
+            function and(...parsers: TypeParser[]): TypeParser {
+                return (c: Cursor) => {
+                    const oldIndex = c.index;
+                    const ok = parsers.every(p => p(c));
+                    if (!ok) {
+                        c.index = oldIndex;
+                    }
+                    return ok;
+                };
+            }
+
+            function or(...parsers: TypeParser[]): TypeParser {
+                return (c: Cursor) => parsers.some(p => p(c));
+            }
+
+            function exact(s: string): TypeParser {
+                return (c: Cursor) => {
+                    if (c.value.length - c.index < s.length) {
+                        return false;
+                    }
+                    const oldIndex = c.index;
+                    for (let i = 0; i < s.length; ++i) {
+                        ++c.index;
+                        if (s[i] !== c.value[oldIndex + i]) {
+                            c.index = oldIndex;
+                            break;
+                        }
+                    }
+                    return c.index !== oldIndex;
+                };
+            }
+
+            function takeMany(f: (char: string) => boolean): TypeParser {
+                return (c: Cursor) => {
+                    const oldIndex = c.index;
+                    while (c.index < c.value.length && f(c.value[c.index])) {
+                        ++c.index;
+                    }
+                    const ok = c.index !== oldIndex;
+                    if (!ok) {
+                        c.index = oldIndex;
+                    }
+                    return ok;
+                };
+            }
+
+            return (source: StringLiteralType) => {
+                const cursor: Cursor = { value: source.value, index: 0 };
+                return and(...parsers)(cursor) && cursor.index >= cursor.value.length;
+            };
+        }
+
         function createTemplateLiteralType(texts: readonly string[], types: readonly Type[]) {
             const type = createType(TypeFlags.TemplateLiteral) as TemplateLiteralType;
             type.texts = texts;
             type.types = types;
+            type.isStringLiteralPatternMatchable = createCombinatorialParser(texts, types);
             return type;
         }
 
@@ -19634,7 +19755,7 @@ namespace ts {
                         // For example, `foo-${number}` is related to `foo-${string}` even though number isn't related to string.
                         instantiateType(source, makeFunctionTypeMapper(reportUnreliableMarkers));
                     }
-                    if (isTypeMatchedByTemplateLiteralType(source, target as TemplateLiteralType)) {
+                    if (sourceFlags & TypeFlags.StringLiteral && (target as TemplateLiteralType).isStringLiteralPatternMatchable(source as StringLiteralType)) {
                         return Ternary.True;
                     }
                 }
