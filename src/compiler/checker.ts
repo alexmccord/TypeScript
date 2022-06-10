@@ -15338,10 +15338,9 @@ namespace ts {
         function getTemplateLiteralType(texts: readonly string[], types: readonly Type[]): Type {
             const unionIndex = findIndex(types, t => !!(t.flags & (TypeFlags.Never | TypeFlags.Union)));
             if (unionIndex >= 0) {
-                return createTemplateLiteralType(texts, types);
-                // return getCrossProductUnionSize(types) > 1000
-                //     ? createTemplateLiteralType(texts, types)
-                //     : mapType(types[unionIndex], t => getTemplateLiteralType(texts, replaceElement(types, unionIndex, t)));
+                return getCrossProductUnionSize(types) > 1000
+                    ? createTemplateLiteralType(texts, types)
+                    : mapType(types[unionIndex], t => getTemplateLiteralType(texts, replaceElement(types, unionIndex, t)));
             }
             if (contains(types, wildcardType)) {
                 return wildcardType;
@@ -15402,10 +15401,8 @@ namespace ts {
             type Cursor = { readonly value: string, index: number };
             type TypeParser = (cursor: Cursor) => boolean;
 
-            const ok = () => true;
-            function optional(...parsers: TypeParser[]): TypeParser {
-                return or(...parsers, ok);
-            }
+            // TODO: if a never type is found, return `() => false`.
+            // TODO: implement a cache.
 
             const plusminus = or(exact('+'), exact('-'));
             const manyDigits = takeMany((char) => char >= '0' && char <= '9');
@@ -15447,18 +15444,10 @@ namespace ts {
                     return and(...subparsers);
                 }
                 else if (type.flags & (TypeFlags.Any | TypeFlags.String)) {
-                    const p = exact(nextText);
-                    return (c: Cursor) => {
-                        const oldIndex = c.index;
-                        while (c.index < c.value.length) {
-                            if (p(c)) {
-                                return true;
-                            }
-                            ++c.index;
-                        }
-                        c.index = oldIndex;
-                        return false;
-                    };
+                    return skipUntil(nextText);
+                }
+                else if (type.flags & TypeFlags.StringMapping) {
+                    return resolveStringMappingParser(type as StringMappingType, nextText);
                 }
                 else if (type.flags & TypeFlags.Number) {
                     return and(numberParser, exact(nextText));
@@ -15470,7 +15459,33 @@ namespace ts {
                     return or(...(type as UnionType).types.map(t => resolveParser(t, nextText)));
                 }
                 else {
+                    // TODO: for intersection types (do they happen by this point??),
+                    // get the normal type of it, then produce a parser.
                     return () => false; // Parser that guarantees a failure.
+                }
+            }
+
+            function resolveStringMappingParser(type: StringMappingType, nextText: string): TypeParser {
+                const symbol = type.symbol;
+                const innerTy = type.type;
+                if (innerTy.flags & TypeFlags.String) {
+                    // `${Lowercase<string>}` is the same as `${string}`
+                    return skipUntil(nextText);
+                }
+                else if (innerTy.flags & TypeFlags.StringLiteral) {
+                    return and(exact(applyStringMapping(symbol, (innerTy as StringLiteralType).value)), exact(nextText));
+                }
+                else if (innerTy.flags & TypeFlags.Union) {
+                    // e.g. Lowercase<'A' | 'B'> is the same as Lowercase<'A'> | Lowercase<'B'>
+                    // but this loses the lowercase-ness (ditto others) when we recurse into resolveParser.
+                    // so clearly we have the wrong design right now.
+                    // TODO: refactor to support above case, didn't notice until it was too late. :(
+                    return or(...(innerTy as UnionType).types.map(t => resolveParser(t, nextText)));
+                }
+                else {
+                    // TODO: for intersection types (do they happen by this point??),
+                    // get the normal type of it, then produce a parser.
+                    return () => false;
                 }
             }
 
@@ -15489,6 +15504,10 @@ namespace ts {
                 return (c: Cursor) => parsers.some(p => p(c));
             }
 
+            function optional(...parsers: TypeParser[]): TypeParser {
+                return or(...parsers, () => true);
+            }
+
             function exact(s: string): TypeParser {
                 return (c: Cursor) => {
                     if (c.value.length - c.index < s.length) {
@@ -15502,7 +15521,7 @@ namespace ts {
                             break;
                         }
                     }
-                    return c.index !== oldIndex;
+                    return c.index - oldIndex >= s.length;
                 };
             }
 
@@ -15517,6 +15536,21 @@ namespace ts {
                         c.index = oldIndex;
                     }
                     return ok;
+                };
+            }
+
+            function skipUntil(s: string): TypeParser {
+                const p = exact(s);
+                return (c: Cursor) => {
+                    const oldIndex = c.index;
+                    while (c.index < c.value.length) {
+                        if (p(c)) {
+                            return true;
+                        }
+                        ++c.index;
+                    }
+                    c.index = oldIndex;
+                    return false;
                 };
             }
 
