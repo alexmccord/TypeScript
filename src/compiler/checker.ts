@@ -15451,7 +15451,7 @@ namespace ts {
 
             const binhexoct = and(exact('0'), or(
                 and(or(exact('b'), exact('B')), takeMany((char) => char === '0' || char === '1')),
-                and(or(exact('x'), exact('X')), takeMany((char) => char >= '0' && char <= '9' || char.toLowerCase() >= 'a' && char.toLowerCase() <= 'f')),
+                and(or(exact('x'), exact('X')), takeMany((char) => char >= '0' && char <= '9' || char.toLowerCase() >= 'a' && char.toLowerCase() <= 'f'), optional(exponent)),
                 and(or(exact('o'), exact('O')), takeMany((char) => char >= '0' && char <= '7')),
             ));
 
