@@ -15432,8 +15432,7 @@ namespace ts {
                 return char;
             }
 
-            // TODO: if a never type is found, return `() => false`.
-            // TODO: implement a cache.
+            const cache: ESMap<TypeId | string, TypeParser> = new Map();
 
             const plusminus = or(exact('+'), exact('-'));
             const manyDigits = takeMany((char) => char >= '0' && char <= '9');
@@ -15453,6 +15452,15 @@ namespace ts {
             const numberParser: TypeParser = ignoreCasing((c: Cursor) => plusminus(c) ? numberParserImpl(c) : or(binhexoct, numberParserImpl)(c));
 
             function resolveOne(type: Type | string): TypeParser {
+                const id = typeof type === "string" ? type : getTypeId(type);
+                let result = cache.get(id);
+                if (!result) {
+                    cache.set(id, result = resolveOneHelper(type));
+                }
+                return result;
+            }
+
+            function resolveOneHelper(type: Type | string): TypeParser {
                 if (typeof type === "string") {
                     return exact(type);
                 }
@@ -15482,12 +15490,10 @@ namespace ts {
                 else if (type.flags & TypeFlags.BigInt) {
                     return bigintParser;
                 }
-                else if (type.flags & TypeFlags.Union) {
-                    return or(...(type as UnionType).types.map(resolveOne));
+                else if (type.flags & TypeFlags.UnionOrIntersection) {
+                    return or(...(type as UnionOrIntersectionType).types.map(resolveOne));
                 }
                 else {
-                    // TODO: for intersection types (do they happen by this point??),
-                    // get the normal type of it, then produce a parser.
                     return () => false; // Parser that guarantees a failure.
                 }
             }
