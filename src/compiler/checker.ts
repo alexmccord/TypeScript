@@ -15420,18 +15420,12 @@ namespace ts {
                 const casings = cursor.casings;
                 if (casings.firstChar === undefined || casings.firstChar === cursor.index) {
                     for (const rule of casings.rules) {
-                        switch (rule) {
-                            case IntrinsicTypeKind.Lowercase:
-                            case IntrinsicTypeKind.Uncapitalize:
-                                char = char.toLowerCase();
-                                break;
-                            case IntrinsicTypeKind.Uppercase:
-                            case IntrinsicTypeKind.Capitalize:
-                                char = char.toUpperCase();
-                                break;
-                            default:
-                                Debug.assert(rule !== undefined);
-                        }
+                        if (rule === IntrinsicTypeKind.Uppercase || rule === IntrinsicTypeKind.Capitalize)
+                            char = char.toUpperCase();
+                        else if (rule === IntrinsicTypeKind.Lowercase || rule === IntrinsicTypeKind.Uncapitalize)
+                            char = char.toLowerCase();
+                        else
+                            Debug.assert(rule !== undefined);
                     }
                 }
 
