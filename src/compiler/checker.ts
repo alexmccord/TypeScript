@@ -15437,7 +15437,7 @@ namespace ts {
             const plusminus = or(exact('+'), exact('-'));
             const manyDigits = takeMany((char) => char >= '0' && char <= '9');
             const exponent = and(or(exact('e'), exact('E')), optional(plusminus), manyDigits);
-            const numberParserImpl = or(
+            const numberLiteralParser = or(
                 and(manyDigits, optional(and(exact('.'), optional(manyDigits))), optional(exponent)),
                 and(exact('.'), manyDigits, optional(exponent))
             );
@@ -15449,7 +15449,7 @@ namespace ts {
             ));
 
             const bigintParser: TypeParser = ignoreCasing((c: Cursor) => and(optional(exact('-')), or(binhexoct, manyDigits))(c));
-            const numberParser: TypeParser = ignoreCasing((c: Cursor) => plusminus(c) ? numberParserImpl(c) : or(binhexoct, numberParserImpl)(c));
+            const numberParser: TypeParser = ignoreCasing((c: Cursor) => plusminus(c) ? numberLiteralParser(c) : or(binhexoct, numberLiteralParser)(c));
 
             function resolveOne(type: Type | string): TypeParser {
                 const id = typeof type === "string" ? type : getTypeId(type);
@@ -15484,12 +15484,6 @@ namespace ts {
                     Debug.assert(mode !== undefined);
                     return intrinsic(resolveOne(stringMappingType.type), mode);
                 }
-                else if (type.flags & TypeFlags.Number) {
-                    return numberParser;
-                }
-                else if (type.flags & TypeFlags.BigInt) {
-                    return bigintParser;
-                }
                 else if (type.flags & TypeFlags.UnionOrIntersection) {
                     return or(...(type as UnionOrIntersectionType).types.map(resolveOne));
                 }
@@ -15501,6 +15495,12 @@ namespace ts {
             function resolveParser(type: Type, nextText: string): TypeParser[] {
                 if (type.flags & (TypeFlags.Any | TypeFlags.String)) {
                     return [skipUntil(nextText)];
+                }
+                else if (type.flags & TypeFlags.Number) {
+                    return [between(numberParser, nextText)];
+                }
+                else if (type.flags & TypeFlags.BigInt) {
+                    return [between(bigintParser, nextText)];
                 }
                 else {
                     return [resolveOne(type), resolveOne(nextText)];
@@ -15526,7 +15526,7 @@ namespace ts {
                 return or(...parsers, () => true);
             }
 
-            function exact(s: string, min?: number): TypeParser {
+            function exact(s: string): TypeParser {
                 return (c: Cursor) => {
                     if (c.value.length - c.index < s.length) {
                         return false;
@@ -15540,7 +15540,7 @@ namespace ts {
                         }
                         ++c.index;
                     }
-                    return c.index - oldIndex >= (min || s.length);
+                    return c.index - oldIndex === s.length;
                 };
             }
 
@@ -15584,24 +15584,49 @@ namespace ts {
             }
 
             function skipUntil(s: string): TypeParser {
-                const p = exact(s, 1);
+                // If s is empty, then the parser will always advance to the end, so we can just skip immediately.
+                // If this turns out to be wrong, the next parser will automatically fail on the basis that it didn't parse anything.
+                if (s.length === 0) {
+                    return (c: Cursor) => {
+                        c.index = c.value.length;
+                        return true;
+                    };
+                }
+                const p = exact(s);
                 return (c: Cursor) => {
                     const oldIndex = c.index;
-                    while (c.index < c.value.length) {
-                        let ok = false;
-                        // Repeated matches at the end is considered part of the ${string} itself.
-                        // Doing this requires the empty string special case.
-                        while (p(c)) {
-                            ok = true;
+                    do {
+                        const ok = p(c);
+                        while (ok && p(c)) {
+                            // The parser already advances the cursor for us.
                         }
                         if (ok) {
                             return true;
                         }
                         ++c.index;
-                    }
+                    } while (c.index < c.value.length);
                     c.index = oldIndex;
                     return false;
                 };
+            }
+
+            function between(p: TypeParser, nextText: string): TypeParser {
+                const skipper = skipUntil(nextText);
+                return (c: Cursor) => {
+                    const startIndex = c.index;
+                    if (!skipper(c)) {
+                        return false;
+                    }
+                    const finalIndex = c.index;
+                    c.index = startIndex;
+                    const ok2 = p(c);
+                    if (ok2) {
+                        c.index = finalIndex;
+                        return true;
+                    }
+                    c.index = startIndex;
+                    return false;
+                }
             }
 
             const parsers: TypeParser[] = [];
