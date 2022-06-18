@@ -15305,22 +15305,15 @@ namespace ts {
         }
 
         function getTemplateLiteralType(texts: readonly string[], types: readonly Type[]): Type {
-            // TODO: Fold in the types only if they aren't unions (some heuristic?), even if there exists a type that is a union.
-            // e.g. `x${'y'}${'z' | 'w'}` -> `xy${'z' | 'w'}`
-            // Then after adding in spans like those, if the cross product is still "simple," may as well fold in the spans inside of unions
-            // Also return `never` if a `never` type is found in `types`.
-            //
-            // Also: another bug.
+            // TODO: another bug.
             // type X = 'a' | 'b' | 'c' | 'd' | 'e' | 'f';
             // type Foo = `${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}${X}`;
             // type Bar = `${Foo}${Foo}` // Bar : "" (????)
             // let bar: Bar = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
             const unionIndex = findIndex(types, t => !!(t.flags & (TypeFlags.Never | TypeFlags.Union)));
-            if (unionIndex >= 0) {
-                return createTemplateLiteralType(texts, types);
-                // return getCrossProductUnionSize(types) > 1000
-                //     ? createTemplateLiteralType(texts, types)
-                //     : mapType(types[unionIndex], t => getTemplateLiteralType(texts, replaceElement(types, unionIndex, t)));
+            const overTheLimit = getCrossProductUnionSize(types) > 1000;
+            if (unionIndex >= 0 && !overTheLimit) {
+                return mapType(types[unionIndex], t => getTemplateLiteralType(texts, replaceElement(types, unionIndex, t)));
             }
             if (contains(types, wildcardType)) {
                 return wildcardType;
@@ -15357,7 +15350,7 @@ namespace ts {
                         addSpans((t as TemplateLiteralType).texts, (t as TemplateLiteralType).types);
                         text += addText;
                     }
-                    else if (isGenericIndexType(t) || isPatternLiteralPlaceholderType(t)) {
+                    else if (isGenericIndexType(t) || isPatternLiteralPlaceholderType(t) || (overTheLimit && (t.flags & TypeFlags.Union))) {
                         newTypes.push(t);
                         newTexts.push(text);
                         text = addText;
@@ -15425,7 +15418,7 @@ namespace ts {
                 }
                 return result;
             }
-
+            
             function resolveOneHelper(type: Type | string): TypeParser {
                 if (typeof type === "string") {
                     return exact(type);
@@ -15450,9 +15443,6 @@ namespace ts {
                     Debug.assert(mode !== undefined);
                     return intrinsic(resolveOne(stringMappingType.type), mode);
                 }
-                else if (type.flags & TypeFlags.UnionOrIntersection) {
-                    return or(...(type as UnionOrIntersectionType).types.map(resolveOne));
-                }
                 else {
                     return () => false; // Parser that guarantees a failure.
                 }
@@ -15467,6 +15457,11 @@ namespace ts {
                 }
                 else if (type.flags & TypeFlags.BigInt) {
                     return [between(bigintParser, nextText)];
+                }
+                else if (type.flags & TypeFlags.UnionOrIntersection) {
+                    const nextTextParser = exact(nextText);
+                    const subparsers = (type as UnionOrIntersectionType).types.map(t => and(resolveOne(t), nextTextParser));
+                    return [or(...subparsers)];
                 }
                 else {
                     return [resolveOne(type), resolveOne(nextText)];
@@ -15579,18 +15574,24 @@ namespace ts {
             function between(p: TypeParser, nextText: string): TypeParser {
                 const skipper = skipUntil(nextText);
                 return (c: Cursor) => {
-                    const startIndex = c.index;
-                    if (!skipper(c)) {
+                    const oldIndex = c.index;
+                    const firstOccurenceIndex = c.value.indexOf(nextText, oldIndex);
+                    if (firstOccurenceIndex < 0) {
                         return false;
                     }
-                    const finalIndex = c.index;
-                    c.index = startIndex;
-                    const ok2 = p(c);
-                    if (ok2) {
-                        c.index = finalIndex;
-                        return true;
+                    const subcursor: Cursor = {
+                        value: c.value.slice(oldIndex, nextText.length === 0 ? c.value.length : firstOccurenceIndex),
+                        index: 0,
+                        casings: c.casings,
+                    };
+                    const ok = p(subcursor) && subcursor.index >= subcursor.value.length;
+                    if (ok) {
+                        c.index += subcursor.index;
+                        if (skipper(c)) {
+                            return true;
+                        }
                     }
-                    c.index = startIndex;
+                    c.index = oldIndex;
                     return false;
                 }
             }
@@ -19860,7 +19861,7 @@ namespace ts {
                         // For example, `foo-${number}` is related to `foo-${string}` even though number isn't related to string.
                         instantiateType(source, makeFunctionTypeMapper(reportUnreliableMarkers));
                     }
-                    if (sourceFlags & TypeFlags.StringLiteral && (target as TemplateLiteralType).isStringLiteralPatternMatchable(source as StringLiteralType)) {
+                    if (isTypeMatchedByTemplateLiteralType(source, target as TemplateLiteralType)) {
                         return Ternary.True;
                     }
                 }
@@ -22485,8 +22486,13 @@ namespace ts {
         }
 
         function isTypeMatchedByTemplateLiteralType(source: Type, target: TemplateLiteralType): boolean {
-            const inferences = inferTypesFromTemplateLiteralType(source, target);
-            return !!inferences && every(inferences, (r, i) => isValidTypeForTemplateLiteralPlaceholder(r, target.types[i]));
+            if (source.flags & TypeFlags.StringLiteral) {
+                return target.isStringLiteralPatternMatchable(source as StringLiteralType);
+            }
+            else {
+                const inferences = inferTypesFromTemplateLiteralType(source, target);
+                return !!inferences && every(inferences, (r, i) => isValidTypeForTemplateLiteralPlaceholder(r, target.types[i]));
+            }
         }
 
         function getStringLikeTypeForType(type: Type) {
